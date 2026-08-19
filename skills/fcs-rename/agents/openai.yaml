@@ -1,0 +1,6 @@
+interface:
+  display_name: "素材改名｜试试就知道了"
+  short_description: "试试就知道了出品，本地核验画面与原声并安全改名"
+  default_prompt: "使用 $fcs-rename 分析这个素材目录的真实画面和原声，先生成重命名预览。"
+policy:
+  allow_implicit_invocation: true
