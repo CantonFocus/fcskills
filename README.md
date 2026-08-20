@@ -10,27 +10,17 @@
 
 ## 安装
 
-发布 GitHub 仓库后，将下面的 `<GitHub用户名>` 替换为实际用户名：
+GitHub 仓库：<https://github.com/CantonFocus/fcskills>
 
-安装「试试就知道了」全部 Skills：
+适用于所有支持 Agent Skills、能够访问本地文件并执行命令的桌面 Agent，包括但不限于豆包桌面版、WorkBuddy、Claude Code、Codex、Cursor、Cline、Gemini CLI、GitHub Copilot、OpenCode、OpenHands、Kiro、Qwen Code 和 Grok。
 
-```bash
-npx -y skills add <GitHub用户名>/fcskills -g --all
-```
-
-当前仓库只有 `fcs-rename`；以后新增的 Skill 也会一起通过这条命令安装。
-
-只安装 `fcs-rename` 到 Codex：
+在终端执行一条命令，安装「试试就知道了」全部 Skills：
 
 ```bash
-npx skills add <GitHub用户名>/fcskills --skill fcs-rename -g -a codex -y
+npx -y skills add CantonFocus/fcskills -g --all
 ```
 
-只安装 `fcs-rename` 到 Claude Code：
-
-```bash
-npx skills add <GitHub用户名>/fcskills --skill fcs-rename -g -a claude-code -y
-```
+`--all` 会把当前仓库的全部 Skills 安装到 `skills` CLI 支持的全部 Agent 入口，并写入通用 Agent Skills 入口。当前仓库只有 `fcs-rename`；以后新增的 Skill 也会一起通过这条命令安装。
 
 安装后重启对应 Agent，再输入：
 
