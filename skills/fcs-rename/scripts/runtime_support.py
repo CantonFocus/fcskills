@@ -12,6 +12,7 @@ import platform
 import shutil
 import stat
 import subprocess
+import sys
 import time
 from typing import Mapping, Sequence
 import unicodedata
@@ -185,6 +186,14 @@ def _decode_output(value: bytes | str | None) -> str:
             except (LookupError, UnicodeDecodeError):
                 pass
         return value.decode("utf-8", errors="replace")
+
+
+def configure_utf8_stdio() -> None:
+    """Keep Chinese CLI output stable when Windows redirects stdout or stderr."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
 
 
 def run_text(

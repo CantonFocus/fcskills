@@ -133,7 +133,14 @@ class RuntimeSupportTests(unittest.TestCase):
             stdout=b"ok\xff",
             stderr=b"",
         )
-        with patch.object(runtime.subprocess, "run", return_value=completed):
+        with (
+            patch.object(runtime.subprocess, "run", return_value=completed),
+            patch.object(
+                runtime.locale,
+                "getpreferredencoding",
+                return_value="utf-8",
+            ),
+        ):
             result = runtime.run_text(["tool"])
 
         self.assertEqual(result.stdout, "ok�")

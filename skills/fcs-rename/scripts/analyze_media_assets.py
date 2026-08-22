@@ -23,7 +23,12 @@ from prepare_local_asr import (
     default_cache_root,
     find_cached_ffmpeg,
 )
-from runtime_support import current_platform, relative_file_url, run_text
+from runtime_support import (
+    configure_utf8_stdio,
+    current_platform,
+    relative_file_url,
+    run_text,
+)
 
 
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv"}
@@ -771,6 +776,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    configure_utf8_stdio()
     args = build_parser().parse_args()
     return args.func(args)
 

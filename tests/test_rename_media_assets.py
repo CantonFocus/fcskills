@@ -385,7 +385,11 @@ class RenameMediaAssetsTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             check=False,
         )
-        self.assertEqual(dry_run.returncode, 0)
+        self.assertEqual(
+            dry_run.returncode,
+            0,
+            dry_run.stderr.decode("utf-8", errors="replace"),
+        )
         self.assertTrue(source.is_file())
 
         applied = subprocess.run(
@@ -394,7 +398,11 @@ class RenameMediaAssetsTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             check=False,
         )
-        self.assertEqual(applied.returncode, 0)
+        self.assertEqual(
+            applied.returncode,
+            0,
+            applied.stderr.decode("utf-8", errors="replace"),
+        )
         self.assertEqual((media_root / target_name).read_bytes(), b"content")
 
         verified = subprocess.run(
@@ -409,7 +417,11 @@ class RenameMediaAssetsTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             check=False,
         )
-        self.assertEqual(verified.returncode, 0)
+        self.assertEqual(
+            verified.returncode,
+            0,
+            verified.stderr.decode("utf-8", errors="replace"),
+        )
 
     def test_cli_preflight_with_empty_cache_does_not_download(self):
         media_root = self.root / "中文 素材 目录"

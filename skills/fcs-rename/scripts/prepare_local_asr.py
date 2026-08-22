@@ -11,6 +11,7 @@ import sys
 import tempfile
 
 from runtime_support import (
+    configure_utf8_stdio,
     current_platform,
     default_cache_root,
     download_verified,
@@ -768,6 +769,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    configure_utf8_stdio()
     args = build_parser().parse_args()
     return args.func(args)
 

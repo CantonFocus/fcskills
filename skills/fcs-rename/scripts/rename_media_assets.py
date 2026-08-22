@@ -17,6 +17,7 @@ from typing import Iterable
 
 from prepare_local_asr import cache_paths, find_cached_ffmpeg
 from runtime_support import (
+    configure_utf8_stdio,
     default_cache_root,
     portable_filename_error,
     portable_filename_key,
@@ -476,6 +477,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 def main() -> int:
+    configure_utf8_stdio()
     args = build_parser().parse_args()
     return args.func(args)
 
