@@ -9,3 +9,4 @@ analysis.tsv
 low_confidence.tsv
 rename_map_template.tsv
 contact_sheet.html
+dist/

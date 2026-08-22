@@ -30,19 +30,32 @@ description: 「试试就知道了」发布的素材改名 Skill。本地分析�
 - 只有用户明确同意执行后，才进行正式重命名。
 - 安装语音识别环境会联网下载和编译第三方工具，必须先说明缺失项并取得授权。
 - 不删除、不转码、不修改文件内容，只修改同一目录内的文件名。
+- 当前不执行递归改名；素材分布在多个子目录时，必须逐个目录分别预演和确认。
 - 出现重复名、目标文件已存在、内容无法识别或分析结果不完整时停止。
 
 ## 支持范围
 
-- 第一个公开版优先支持搭载 Apple Silicon 的 macOS。
+- 兼容目标：Apple Silicon macOS、Intel macOS 和 Windows x64。
+- 发布前必须分别通过 macOS 与 Windows 的单元测试、依赖安装和真实素材烟雾测试；未通过时只能标记为「待验证」。
+- Windows ARM64 和 Linux 尚未支持，不得宣称已完整支持。
+- 需要 Python 3.9 或更高版本，Agent 必须具备执行本地命令和读写素材目录的能力。
+- 首次准备依赖时，当前 Python 需要可用的 `pip`。
+- Windows x64 需要 Microsoft Visual C++ Runtime；缺失时必须在任何依赖下载前停止，并引导用户从 `https://aka.ms/vc14/vc_redist.x64.exe` 获取微软官方安装包，不得静默修改系统。
 - 视频：`.mp4`、`.mov`、`.m4v`、`.avi`、`.mkv`。
 - 图片：`.jpg`、`.jpeg`、`.png`、`.heic`、`.webp`。
-- Windows、Linux 和 Intel Mac 尚未完整验证，不得宣称已完整支持。
+
+## Python 解释器选择
+
+下文的 `<python>` 是占位符，不得原样执行。Agent 先查找并验证 Python 3.9 或更高版本，再将占位符替换为实际命令：
+
+- Windows：优先尝试 `py -3`，其次尝试 `python`。
+- macOS：优先尝试 `python3`，其次尝试 `python`。
+- 不要硬编码用户本机路径，不要假设所有系统都存在 `python3`。
 
 ## 命名规则
 
 - 编号使用 3 位数字，从 `001` 开始。
-- 默认按拍摄时间排序；无法读取时按文件创建时间，仍无法读取时按文件名。
+- 默认按当前文件系统记录的创建时间排序；系统不提供创建时间时使用修改时间。该值不等同于相机元数据中的实际拍摄时间；需要精确拍摄顺序时必须人工复核。
 - 保留原扩展名和大小写。
 - 字段内不使用 `_`，避免破坏分隔结构。
 - 文件名只记录真实可见、可听的内容，不预测它将来的剪辑功能。
@@ -73,40 +86,40 @@ description: 「试试就知道了」发布的素材改名 Skill。本地分析�
 2. 检查本地环境：
 
    ```bash
-   python3 "<skill目录>/scripts/rename_media_assets.py" preflight --root "<素材目录>"
+   <python> "<skill目录>/scripts/rename_media_assets.py" preflight --root "<素材目录>"
    ```
 
-3. 如果环境缺失，说明将下载的工具和缓存位置；取得授权后才执行：
+3. 如果环境缺失，说明将下载的工具和缓存位置；取得授权后才执行。Windows x64 先检查 Microsoft Visual C++ Runtime，再使用经 SHA-256 校验的 Whisper 官方预编译包。macOS 使用固定版本的源码构建：如本机缺少 CMake，安装器会在授权后准备经校验的固定版本；构建生成器优先使用已检测到的 Ninja，否则使用 Apple Command Line Tools 中的 `make`，不隐式猜测。FFmpeg 只使用与当前平台对应的固定 wheel 与 SHA-256，不回退到任意系统 FFmpeg：
 
    ```bash
-   python3 "<skill目录>/scripts/prepare_local_asr.py" install
+   <python> "<skill目录>/scripts/prepare_local_asr.py" install
    ```
 
 4. 一次生成画面、转写和复查表：
 
    ```bash
-   python3 "<skill目录>/scripts/rename_media_assets.py" analyze --root "<素材目录>" --out "<临时目录>"
+   <python> "<skill目录>/scripts/rename_media_assets.py" analyze --root "<素材目录>" --out "<临时目录>"
    ```
 
 5. 先复查 `low_confidence.tsv`，再结合 `analysis.tsv` 和 `contact_sheet.html` 判断全部素材。
-6. 生成「原文件名 -> 新文件名」TSV 映射并展示给用户。
+6. 生成「原文件名 -> 新文件名」TSV 映射并展示给用户。映射必须覆盖当前目录的全部受支持素材，目标编号必须从 `001` 连续到素材总数；任一条件不满足时，在移动首个文件前停止。
 7. 执行预演：
 
    ```bash
-   python3 "<skill目录>/scripts/rename_media_assets.py" apply --root "<素材目录>" --map "<映射.tsv>" --dry-run
+   <python> "<skill目录>/scripts/rename_media_assets.py" apply --root "<素材目录>" --map "<映射.tsv>" --dry-run
    ```
 
 8. 等待用户明确同意。未取得同意时不得正式改名。
 9. 用户同意后执行：
 
    ```bash
-   python3 "<skill目录>/scripts/rename_media_assets.py" apply --root "<素材目录>" --map "<映射.tsv>"
+   <python> "<skill目录>/scripts/rename_media_assets.py" apply --root "<素材目录>" --map "<映射.tsv>"
    ```
 
 10. 执行复核：
 
-    ```bash
-    python3 "<skill目录>/scripts/rename_media_assets.py" verify --root "<素材目录>"
+   ```bash
+    <python> "<skill目录>/scripts/rename_media_assets.py" verify --root "<素材目录>"
     ```
 
 ## 分析质量要求

@@ -13,7 +13,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 from typing import Iterable
@@ -24,6 +23,7 @@ from prepare_local_asr import (
     default_cache_root,
     find_cached_ffmpeg,
 )
+from runtime_support import current_platform, relative_file_url, run_text
 
 
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv"}
@@ -84,18 +84,19 @@ def scan_media(root: Path, recursive: bool) -> list[MediaItem]:
     ]
 
 
-def run_process(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
+def run_process(
+    command: list[str],
+    cwd: Path | None = None,
+    timeout: float | None = None,
+):
+    return run_text(command, cwd=cwd, timeout=timeout)
 
 
 def probe_duration(ffmpeg: Path, path: Path) -> float:
-    result = run_process([str(ffmpeg), "-hide_banner", "-i", str(path)])
+    result = run_process(
+        [str(ffmpeg), "-hide_banner", "-i", str(path)],
+        timeout=60,
+    )
     text = result.stderr + "\n" + result.stdout
     match = DURATION_RE.search(text)
     if not match:
@@ -134,7 +135,7 @@ def extract_frame(
             str(output),
         ]
     )
-    result = run_process(command)
+    result = run_process(command, timeout=120)
     if result.returncode != 0 or not output.is_file():
         error = result.stderr.strip() or "未知错误"
         raise RuntimeError(f"画面提取失败：{source.name}：{error}")
@@ -160,7 +161,7 @@ def extract_audio(ffmpeg: Path, source: Path, output: Path) -> tuple[Path | None
         "pcm_s16le",
         str(output),
     ]
-    result = run_process(command)
+    result = run_process(command, timeout=600)
     if output.is_file() and output.stat().st_size > 44:
         return output, "有音轨"
     text = (result.stderr + result.stdout).lower()
@@ -218,9 +219,14 @@ def transcribe_batch(
     cli: Path,
     model: Path,
     language: str,
+    platform_system: str | None = None,
 ) -> None:
     with_audio = [result for result in results if result.wav is not None]
     if not with_audio:
+        return
+
+    if current_platform(system_name=platform_system).is_windows:
+        _transcribe_windows_staged(with_audio, cli, model, language)
         return
 
     base_command = [
@@ -233,34 +239,169 @@ def transcribe_batch(
         "-np",
         "-ojf",
     ]
-    command = list(base_command)
-    command.extend(str(result.wav) for result in with_audio if result.wav)
-    batch = subprocess.run(
-        command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
+    arguments = {
+        result.item.index: str(result.wav)
+        for result in with_audio
+        if result.wav is not None
+    }
+    json_paths = {
+        result.item.index: Path(str(result.wav) + ".json")
+        for result in with_audio
+        if result.wav is not None
+    }
+    _run_transcription_commands(
+        with_audio,
+        base_command,
+        arguments,
+        json_paths,
     )
 
-    missing = [
-        result
-        for result in with_audio
-        if result.wav and not Path(str(result.wav) + ".json").is_file()
-    ]
-    for result in missing:
-        assert result.wav is not None
-        single = subprocess.run(
-            base_command + [str(result.wav)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
+
+def _run_transcription_commands(
+    results: list[AnalysisResult],
+    base_command: list[str],
+    arguments: dict[int, str],
+    json_paths: dict[int, Path],
+    cwd: Path | None = None,
+    max_chars: int | None = None,
+) -> None:
+    for batch_results in transcription_batches(
+        results,
+        base_command,
+        max_chars=max_chars,
+        arguments=arguments,
+    ):
+        command = list(base_command)
+        command.extend(arguments[result.item.index] for result in batch_results)
+        batch_error = ""
+        try:
+            batch = run_process(command, cwd=cwd, timeout=7200)
+            if batch.returncode != 0:
+                batch_error = batch.stderr.strip() or batch.stdout.strip()
+        except RuntimeError as exc:
+            batch_error = str(exc)
+
+        missing = [
+            result
+            for result in batch_results
+            if not json_paths[result.item.index].is_file()
+        ]
+        for result in missing:
+            single_error = ""
+            try:
+                single_command = base_command + [arguments[result.item.index]]
+                single = run_process(single_command, cwd=cwd, timeout=1800)
+                if single.returncode != 0:
+                    single_error = single.stderr.strip() or single.stdout.strip()
+            except RuntimeError as exc:
+                single_error = str(exc)
+            json_path = json_paths[result.item.index]
+            if not json_path.is_file():
+                reason = single_error or batch_error or "没有生成转写结果"
+                result.review_reason = f"转写失败：{reason}"
+
+
+def _link_or_copy(source: Path, destination: Path) -> None:
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+
+
+def _transcribe_windows_staged(
+    results: list[AnalysisResult],
+    cli: Path,
+    model: Path,
+    language: str,
+) -> None:
+    original_json_paths = {
+        result.item.index: Path(str(result.wav) + ".json")
+        for result in results
+        if result.wav is not None
+    }
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="fcs-rename-asr-",
+            dir=str(cli.parent),
+        ) as temp:
+            stage = Path(temp)
+            staged_model = stage / "model.bin"
+            _link_or_copy(model, staged_model)
+
+            arguments: dict[int, str] = {}
+            staged_json_paths: dict[int, Path] = {}
+            for sequence, result in enumerate(results, 1):
+                if result.wav is None:
+                    continue
+                staged_wav = stage / f"audio-{sequence:06d}.wav"
+                _link_or_copy(result.wav, staged_wav)
+                arguments[result.item.index] = staged_wav.name
+                staged_json_paths[result.item.index] = Path(
+                    str(staged_wav) + ".json"
+                )
+
+            base_command = [
+                str(cli.resolve()),
+                "-m",
+                staged_model.name,
+                "-l",
+                language,
+                "-nt",
+                "-np",
+                "-ojf",
+            ]
+            _run_transcription_commands(
+                results,
+                base_command,
+                arguments,
+                staged_json_paths,
+                cwd=stage,
+                max_chars=24000,
+            )
+            for result in results:
+                source_json = staged_json_paths[result.item.index]
+                if not source_json.is_file():
+                    continue
+                target_json = original_json_paths[result.item.index]
+                if target_json.exists():
+                    raise RuntimeError(f"转写目标已存在：{target_json.name}")
+                shutil.move(str(source_json), target_json)
+    except (OSError, RuntimeError) as exc:
+        for result in results:
+            target_json = original_json_paths[result.item.index]
+            if not target_json.is_file() and not result.review_reason:
+                result.review_reason = f"Windows 安全路径转写失败：{exc}"
+
+
+def transcription_batches(
+    results: list[AnalysisResult],
+    base_command: list[str],
+    max_chars: int | None = None,
+    arguments: dict[int, str] | None = None,
+) -> list[list[AnalysisResult]]:
+    limit = max_chars or (24000 if os.name == "nt" else 100000)
+    base_size = sum(len(part) + 3 for part in base_command)
+    batches: list[list[AnalysisResult]] = []
+    current: list[AnalysisResult] = []
+    current_size = base_size
+    for result in results:
+        if result.wav is None:
+            continue
+        argument = (
+            arguments[result.item.index]
+            if arguments is not None
+            else str(result.wav)
         )
-        json_path = Path(str(result.wav) + ".json")
-        if single.returncode != 0 or not json_path.is_file():
-            reason = single.stderr.strip() or batch.stderr.strip() or "未知错误"
-            result.review_reason = f"转写失败：{reason}"
+        path_size = len(argument) + 3
+        if current and current_size + path_size > limit:
+            batches.append(current)
+            current = []
+            current_size = base_size
+        current.append(result)
+        current_size += path_size
+    if current:
+        batches.append(current)
+    return batches
 
 
 def parse_transcript(result: AnalysisResult, transcripts_dir: Path) -> None:
@@ -355,7 +496,7 @@ def write_analysis(results: list[AnalysisResult], out_dir: Path) -> tuple[Path, 
     review_path = out_dir / "low_confidence.tsv"
     header = [
         "序号",
-        "拍摄时间",
+        "文件排序时间",
         "原文件名",
         "时长秒",
         "画面数",
@@ -446,7 +587,7 @@ def write_contact_sheet(results: list[AnalysisResult], out_dir: Path) -> Path:
     ]
     for result in results:
         images = "".join(
-            f"<img src='{html.escape(os.path.relpath(frame, out_dir))}'>"
+            f"<img src='{relative_file_url(frame, out_dir)}'>"
             for frame in result.frames
         )
         lines.extend(
@@ -470,6 +611,10 @@ def write_contact_sheet(results: list[AnalysisResult], out_dir: Path) -> Path:
 
 
 def command_preflight(args: argparse.Namespace) -> int:
+    if args.recursive:
+        print("递归改名尚未支持，请逐个目录处理。")
+        print("快速安全分析：不可用")
+        return 1
     cache_root = Path(args.cache).expanduser().resolve()
     ready, messages = check_status(cache_root)
     print(f"缓存目录：{cache_root}")
@@ -494,6 +639,12 @@ def command_preflight(args: argparse.Namespace) -> int:
 
 
 def command_analyze(args: argparse.Namespace) -> int:
+    if args.recursive:
+        print(
+            "分析停止：递归改名尚未支持，请逐个目录处理。",
+            file=sys.stderr,
+        )
+        return 1
     root = Path(args.root).expanduser().resolve()
     if not root.is_dir():
         print(f"分析停止：目录不存在：{root}", file=sys.stderr)

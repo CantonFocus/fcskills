@@ -5,14 +5,31 @@ on:
   pull_request:
 
 jobs:
-  test:
-    runs-on: macos-14
+  unit-and-contract:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            python: "3.9.13"
+          - os: macos-14
+            python: "3.11"
+          - os: macos-15-intel
+            python: "3.9"
+          - os: macos-15-intel
+            python: "3.11"
+          - os: windows-latest
+            python: "3.9"
+          - os: windows-latest
+            python: "3.11"
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python }}
       - name: Check Python syntax
-        run: python3 -m py_compile skills/fcs-rename/scripts/*.py
-      - name: Run safety tests
-        run: python3 -m unittest discover -s tests -v
+        run: python -m compileall -q skills tests
+      - name: Run unit and platform-contract tests
+        run: python -m unittest discover -s tests -v

@@ -6,7 +6,6 @@ import csv
 import html
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,7 +15,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from prepare_local_asr import default_cache_root
+from prepare_local_asr import cache_paths, find_cached_ffmpeg
+from runtime_support import (
+    default_cache_root,
+    portable_filename_error,
+    portable_filename_key,
+    relative_file_url,
+    rename_no_replace,
+    run_text,
+)
 
 MEDIA_EXTS = {
     ".mp4", ".mov", ".m4v", ".avi", ".mkv",
@@ -35,6 +42,16 @@ class MediaItem:
     def created_text(self) -> str:
         return datetime.fromtimestamp(self.created_at).strftime("%Y-%m-%d %H:%M:%S")
 
+
+@dataclass
+class RenameStage:
+    temporary: Path
+    target: Path
+    original: Path
+    identity: tuple[int, int, int, int]
+    moved: bool = False
+    completed: bool = False
+
 def is_media(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in MEDIA_EXTS and not path.name.startswith(".")
 
@@ -49,33 +66,52 @@ def scan_media(root: Path, recursive: bool = False) -> list[MediaItem]:
     files.sort(key=lambda p: (file_time(p), p.name))
     return [MediaItem(i + 1, p, file_time(p)) for i, p in enumerate(files)]
 
-def run_quicklook(files: list[Path], out_dir: Path, size: int) -> None:
-    qlmanage = shutil.which("qlmanage")
-    if not qlmanage or not files:
-        raise RuntimeError("Quick Look 不可用")
+def run_thumbnails(
+    items: list[MediaItem],
+    out_dir: Path,
+    size: int,
+    cache_root: Path,
+) -> None:
+    if not items:
+        raise RuntimeError("没有可生成缩略图的素材")
+    ffmpeg = find_cached_ffmpeg(cache_paths(cache_root)["python"])
+    if ffmpeg is None:
+        raise RuntimeError(
+            "FFmpeg 缺失或无法运行。请先执行 preflight；"
+            "在授权下载后再运行本地依赖安装。"
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
     failures: list[str] = []
-    for start in range(0, len(files), 50):
-        chunk = files[start:start + 50]
-        cmd = [qlmanage, "-t", "-s", str(size), "-o", str(out_dir)] + [str(p) for p in chunk]
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
+    for item in items:
+        target = out_dir / f"{item.index:03d}.jpg"
+        command = [
+            str(ffmpeg),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(item.path),
+            "-frames:v",
+            "1",
+            "-vf",
+            f"scale={size}:{size}:force_original_aspect_ratio=decrease",
+            "-q:v",
+            "3",
+            str(target),
+        ]
+        result = run_text(command, timeout=120)
         if result.returncode != 0:
-            failures.append(result.stderr.strip() or f"退出码 {result.returncode}")
+            detail = result.stderr.strip() or f"退出码 {result.returncode}"
+            failures.append(f"{item.path.name}：{detail}")
+        elif not target.is_file() or target.stat().st_size == 0:
+            failures.append(f"{item.path.name}：未生成有效缩略图")
     if failures:
-        raise RuntimeError("Quick Look 生成失败：" + "；".join(failures))
+        raise RuntimeError("缩略图生成失败：" + "；".join(failures))
 
 def thumbnail_for(item: MediaItem, thumb_dir: Path) -> Path | None:
-    for suffix in (".png", ".jpg"):
-        candidate = thumb_dir / f"{item.path.name}{suffix}"
-        if candidate.exists():
-            return candidate
-    return None
+    candidate = thumb_dir / f"{item.index:03d}.jpg"
+    return candidate if candidate.is_file() else None
 
 def write_contact_sheet(items: list[MediaItem], out_dir: Path, title: str) -> Path:
     html_path = out_dir / "contact_sheet.html"
@@ -97,7 +133,11 @@ def write_contact_sheet(items: list[MediaItem], out_dir: Path, title: str) -> Pa
     ]
     for item in items:
         thumb = thumbnail_for(item, thumb_dir)
-        img = f"<img src='{html.escape(str(thumb))}'>" if thumb else "<div style='height:240px;background:#eee;display:flex;align-items:center;justify-content:center;color:#777'>no thumbnail</div>"
+        img = (
+            f"<img src='{relative_file_url(thumb, out_dir)}'>"
+            if thumb
+            else "<div style='height:240px;background:#eee;display:flex;align-items:center;justify-content:center;color:#777'>no thumbnail</div>"
+        )
         lines.extend([
             "<div class='card'>", img,
             f"<p><span class='idx'>{item.index:03d}</span></p>",
@@ -118,6 +158,12 @@ def write_template(items: list[MediaItem], out_dir: Path) -> Path:
     return path
 
 def command_scan(args: argparse.Namespace) -> int:
+    if args.recursive:
+        print(
+            "扫描停止：递归改名尚未支持，请逐个目录处理。",
+            file=sys.stderr,
+        )
+        return 1
     root = Path(args.root).expanduser().resolve()
     if not root.is_dir():
         print(f"目录不存在：{root}", file=sys.stderr)
@@ -129,7 +175,8 @@ def command_scan(args: argparse.Namespace) -> int:
     out_dir = Path(args.out).expanduser().resolve() if args.out else Path(tempfile.mkdtemp(prefix="fcs-rename-"))
     thumb_dir = out_dir / "thumbs"
     try:
-        run_quicklook([item.path for item in items], thumb_dir, args.thumb_size)
+        cache_root = Path(args.cache).expanduser().resolve()
+        run_thumbnails(items, thumb_dir, args.thumb_size, cache_root)
     except Exception as exc:
         print(f"扫描停止：{exc}", file=sys.stderr)
         return 1
@@ -177,8 +224,9 @@ def read_map(path: Path) -> list[tuple[str, str]]:
             if len(row) < 2:
                 raise ValueError(f"第 {lineno} 行少于 2 列")
             old, new = row[0].strip(), row[1].strip()
-            if old and new:
-                rows.append((old, new))
+            if not old or not new:
+                raise ValueError(f"第 {lineno} 行映射不完整")
+            rows.append((old, new))
     return rows
 
 def validate_mapping(root: Path, rows: list[tuple[str, str]]) -> None:
@@ -187,27 +235,101 @@ def validate_mapping(root: Path, rows: list[tuple[str, str]]) -> None:
         raise ValueError("映射为空")
     old_names = [old for old, _ in rows]
     new_names = [new for _, new in rows]
-    duplicate_sources = sorted({x for x in old_names if old_names.count(x) > 1})
+    source_keys = [portable_filename_key(name) for name in old_names]
+    target_keys = [portable_filename_key(name) for name in new_names]
+    duplicate_sources = sorted(
+        {
+            old_names[index]
+            for index, key in enumerate(source_keys)
+            if source_keys.count(key) > 1
+        }
+    )
     if duplicate_sources:
         raise ValueError("原文件名重复：" + ", ".join(duplicate_sources))
-    duplicate_targets = sorted({x for x in new_names if new_names.count(x) > 1})
+    duplicate_targets = sorted(
+        {
+            new_names[index]
+            for index, key in enumerate(target_keys)
+            if target_keys.count(key) > 1
+        }
+    )
     if duplicate_targets:
         raise ValueError("目标文件名重复：" + ", ".join(duplicate_targets))
+
+    existing_by_key: dict[str, list[str]] = {}
+    for existing in root.iterdir():
+        existing_by_key.setdefault(portable_filename_key(existing.name), []).append(existing.name)
+    old_key_set = set(source_keys)
+
     for old, new in rows:
+        if "/" in old or "\\" in old or old in {".", ".."}:
+            raise ValueError(f"原文件名非法：{old}")
         old_path = root / old
         new_path = root / new
-        if not old_path.exists():
+        if not old_path.is_file():
             raise ValueError(f"原文件不存在：{old}")
         if old_path.resolve().parent != root:
             raise ValueError(f"原文件不在目标目录内：{old}")
-        if "/" in new or "\\" in new or new in {".", ".."}:
-            raise ValueError(f"目标文件名非法：{new}")
+        if old_path.suffix.lower() not in MEDIA_EXTS:
+            raise ValueError(f"原文件不是受支持的素材：{old}")
+        filename_error = portable_filename_error(new)
+        if filename_error:
+            raise ValueError(f"目标文件名非法：{new}：{filename_error}")
         if old_path.suffix != new_path.suffix:
             raise ValueError(f"扩展名不一致：{old} -> {new}")
         if not NAME_RE.match(new):
             raise ValueError(f"目标文件名不符合格式：{new}")
-        if new_path.exists() and new not in old_names:
-            raise ValueError(f"目标文件已存在：{new}")
+        collisions = [
+            name
+            for name in existing_by_key.get(portable_filename_key(new), [])
+            if portable_filename_key(name) not in old_key_set
+        ]
+        if collisions:
+            raise ValueError(
+                f"目标文件已存在或大小写冲突：{new} -> {collisions[0]}"
+            )
+
+    media_names = [path.name for path in root.iterdir() if is_media(path)]
+    media_keys = [portable_filename_key(name) for name in media_names]
+    duplicate_media = sorted(
+        {
+            media_names[index]
+            for index, key in enumerate(media_keys)
+            if media_keys.count(key) > 1
+        }
+    )
+    if duplicate_media:
+        raise ValueError(
+            "目录中存在跨平台大小写或 Unicode 冲突："
+            + ", ".join(duplicate_media)
+        )
+
+    missing_keys = set(media_keys) - old_key_set
+    extra_keys = old_key_set - set(media_keys)
+    if missing_keys or extra_keys:
+        missing = sorted(
+            name
+            for name in media_names
+            if portable_filename_key(name) in missing_keys
+        )
+        detail = "、".join(missing) if missing else "映射含目录外素材"
+        raise ValueError(f"映射必须覆盖当前目录的全部素材；缺少：{detail}")
+
+    target_numbers = sorted(int(name.split("_", 1)[0]) for name in new_names)
+    expected_numbers = list(range(1, len(new_names) + 1))
+    if target_numbers != expected_numbers:
+        expected_end = f"{len(new_names):03d}"
+        raise ValueError(f"目标编号必须从 001 到 {expected_end} 连续且不重复")
+
+
+def file_identity(path: Path) -> tuple[int, int, int, int]:
+    details = path.stat()
+    return (
+        int(details.st_dev),
+        int(details.st_ino),
+        int(details.st_size),
+        int(details.st_mtime_ns),
+    )
 
 def apply_mapping(root: Path, rows: list[tuple[str, str]], dry_run: bool) -> None:
     root = root.expanduser().resolve()
@@ -215,27 +337,51 @@ def apply_mapping(root: Path, rows: list[tuple[str, str]], dry_run: bool) -> Non
     if dry_run:
         return
     token = uuid.uuid4().hex[:12]
-    staged: list[tuple[Path, Path, Path]] = []
+    staged: list[RenameStage] = []
     try:
-        for old, new in rows:
+        for index, (old, new) in enumerate(rows, 1):
             old_path = root / old
-            tmp_path = root / f".fcs-renaming-{token}-{old_path.name}"
+            tmp_path = root / f".fcs-renaming-{token}-{index:04d}.tmp"
             if tmp_path.exists():
                 raise ValueError(f"临时文件已存在：{tmp_path.name}")
-            staged.append((tmp_path, root / new, old_path))
-            old_path.rename(tmp_path)
-        for tmp_path, new_path, _old_path in staged:
-            tmp_path.rename(new_path)
-    except Exception as exc:
+            stage = RenameStage(
+                temporary=tmp_path,
+                target=root / new,
+                original=old_path,
+                identity=file_identity(old_path),
+            )
+            staged.append(stage)
+            rename_no_replace(stage.original, stage.temporary)
+            stage.moved = True
+        for stage in staged:
+            rename_no_replace(stage.temporary, stage.target)
+            stage.completed = True
+    except BaseException as exc:
         rollback_errors: list[str] = []
-        for tmp_path, new_path, old_path in reversed(staged):
-            current_path = new_path if new_path.exists() else tmp_path
-            if old_path.exists() or not current_path.exists():
+        for stage in reversed(staged):
+            if not stage.moved:
+                continue
+            current_path = stage.target if stage.completed else stage.temporary
+            if not current_path.is_file():
+                rollback_errors.append(f"找不到待恢复文件：{current_path.name}")
+                continue
+            if file_identity(current_path) != stage.identity:
+                rollback_errors.append(
+                    f"文件身份已变化，未移动：{current_path}"
+                )
+                continue
+            if stage.original.exists():
+                rollback_errors.append(
+                    f"原路径已被占用：{stage.original}；"
+                    f"原素材保留在：{current_path}"
+                )
                 continue
             try:
-                current_path.rename(old_path)
-            except Exception as rollback_exc:
-                rollback_errors.append(f"{current_path.name} -> {old_path.name}：{rollback_exc}")
+                rename_no_replace(current_path, stage.original)
+            except BaseException as rollback_exc:
+                rollback_errors.append(
+                    f"{current_path.name} -> {stage.original.name}：{rollback_exc}"
+                )
         if rollback_errors:
             detail = "；".join(rollback_errors)
             raise RuntimeError(f"重命名失败，且自动恢复不完整：{detail}") from exc
@@ -258,8 +404,20 @@ def command_apply(args: argparse.Namespace) -> int:
     return 0
 
 def command_verify(args: argparse.Namespace) -> int:
+    if args.recursive:
+        print(
+            "复核停止：递归改名尚未支持，请逐个目录处理。",
+            file=sys.stderr,
+        )
+        return 1
     root = Path(args.root).expanduser().resolve()
+    if not root.is_dir():
+        print(f"复核停止：目录不存在：{root}", file=sys.stderr)
+        return 1
     items = scan_media(root, args.recursive)
+    if not items:
+        print("复核停止：没有找到可处理素材。", file=sys.stderr)
+        return 1
     names = [item.path.name for item in items]
     numbered = [name for name in names if NAME_RE.match(name)]
     nums = []
@@ -304,6 +462,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--out", default="")
     scan.add_argument("--recursive", action="store_true")
     scan.add_argument("--thumb-size", type=int, default=360)
+    scan.add_argument("--cache", default=DEFAULT_CACHE)
     scan.set_defaults(func=command_scan)
     apply = sub.add_parser("apply", help="apply a TSV rename map")
     apply.add_argument("--root", default=".")

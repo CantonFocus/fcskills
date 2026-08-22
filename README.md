@@ -6,7 +6,7 @@
 
 本地分析视频和图片的画面与原声，先生成重命名预览，获得同意后再改名。素材不上传。
 
-当前版本优先支持搭载 Apple Silicon 的 macOS。Windows、Linux 和 Intel Mac 尚未完整验证。
+当前代码的兼容目标是 Apple Silicon macOS、Intel macOS 和 Windows x64。每个平台都必须分别完成单元测试、固定依赖安装和真实素材烟雾测试，才能标记为「完整支持」；结果尚未记录时统一标记为「待验证」。Windows ARM64 和 Linux 尚未支持。
 
 ## 安装
 
@@ -30,7 +30,7 @@ npx -y skills add CantonFocus/fcskills -g --all
 
 ## 首次使用
 
-首次分析前，Skill 会检查本地的 Whisper、语音模型和 FFmpeg。如果缺失，Agent 应先说明下载内容并征得同意，不会默认联网安装。
+需要 Python 3.9 或更高版本；首次准备依赖时，该 Python 还需要可用的 `pip`。Windows x64 需要 Microsoft Visual C++ Runtime，Skill 会在下载 Whisper 前检查，缺失时只提示使用[微软官方 x64 安装包](https://aka.ms/vc14/vc_redist.x64.exe)，不会代替用户修改系统。首次分析前，Skill 会检查本地的 Whisper、语音模型和固定版本 FFmpeg；如果缺失，Agent 应先说明下载内容并征得同意，不会默认联网安装。
 
 ## 许可证
 
